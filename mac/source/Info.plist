@@ -8,6 +8,8 @@
 	<string>FlowLauncher</string>
 	<key>CFBundleIdentifier</key>
 	<string>local.flowlauncher.app</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
 	<key>CFBundleName</key>
 	<string>Google 登录助手</string>
 	<key>CFBundlePackageType</key>
