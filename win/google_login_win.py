@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import socket
 import struct
 import subprocess
@@ -23,7 +24,7 @@ import time
 import urllib.request
 
 APP_NAME = "Google 登录助手 Win"
-VERSION = "1.4"
+VERSION = "1.5"
 
 # ---------------------------------------------------------------- 登录目标
 TARGETS = {
@@ -765,7 +766,7 @@ class App:
         self.browsers = {}
         self.stop = StopFlag()
         self.worker = None
-        self.msgq = __import__("queue").Queue()
+        self.msgq = queue.Queue()
         self._build()
         self._refresh()
         self._poll()
