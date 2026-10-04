@@ -23,7 +23,7 @@ import time
 import urllib.request
 
 APP_NAME = "Google 登录助手 Win"
-VERSION = "1.1"
+VERSION = "1.2"
 
 # ---------------------------------------------------------------- 登录目标
 TARGETS = {
@@ -125,6 +125,34 @@ const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};"""
 JS_VERIFY_FILL = """if(location.protocol!=='https:' || location.hostname!=='accounts.google.com') return false;
 const e=Array.from(document.querySelectorAll(arguments[0])).find(e=>e.getClientRects().length&&!e.disabled);
 return !!e&&document.activeElement===e&&e.value===arguments[1];"""
+
+# Google 选账号页：找与本账号邮箱一致的账号行，返回点击坐标；无匹配返回 null
+#（只在无输入框时调用，密码页顶部显示的邮箱不会误触）
+JS_GOOGLE_CHOOSER = """const want=(arguments[0]||'').toLowerCase();
+if(location.protocol!=='https:'||location.hostname!=='accounts.google.com'||!want) return null;
+const center=e=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
+const vis=e=>e.getClientRects().length>0;
+const row=Array.from(document.querySelectorAll('[data-identifier]')).find(e=>(e.getAttribute('data-identifier')||'').toLowerCase()===want&&vis(e));
+if(row) return center(row);
+const bodyText=(document.body&&(document.body.innerText||''))||'';
+if(/选择账号|選擇帳號|Choose an account/i.test(bodyText)){
+  const leaf=Array.from(document.querySelectorAll('div,a,button,li')).find(e=>{
+    const t=(e.innerText||'').toLowerCase();
+    if(!t.includes(want)) return false;
+    if(Array.from(e.children).some(c=>((c.innerText||'').toLowerCase().includes(want)))) return false;
+    return vis(e);
+  });
+  if(leaf){
+    let el=leaf;
+    while(el&&el!==document.body){
+      const tg=el.tagName, rl=el.getAttribute?el.getAttribute('role'):null;
+      if(tg==='A'||tg==='BUTTON'||rl==='link'||rl==='button'||(el.hasAttribute&&el.hasAttribute('data-identifier'))) break;
+      el=el.parentElement;
+    }
+    return center(el&&el!==document.body?el:leaf);
+  }
+}
+return null;"""
 
 SITE_SCRIPTS = {
     "flow": {"signed_in": JS_FLOW_SIGNED_IN, "action": JS_FLOW_ACTION},
@@ -527,6 +555,8 @@ def login_account(browser, account, target_key, stop, update):
     workspace_matches = 0
     passkey_skips = 0
     last_passkey_skip = 0.0
+    chooser_attempts = 0
+    last_chooser = 0.0
     last_action = 0.0
     try:
         handles = set(browser.page_ids())
@@ -563,6 +593,22 @@ def login_account(browser, account, target_key, stop, update):
                 update("Google 拒绝自动化登录 · 请用“普通打开”手动完成登录")
                 return
             if not state.get("email") and not state.get("password") and not state.get("otp"):
+                # Google 选账号页：自动点选与本账号邮箱一致的账号
+                if chooser_attempts < 3 and time.time() - last_chooser > 6:
+                    try:
+                        pt = browser.evaluate(JS_GOOGLE_CHOOSER, [account["email"]])
+                    except CDPError:
+                        pt = None
+                    if isinstance(pt, dict) and isinstance(pt.get("x"), (int, float)) and isinstance(pt.get("y"), (int, float)):
+                        chooser_attempts += 1
+                        last_chooser = time.time()
+                        update("选择 Google 账号")
+                        try:
+                            browser.click_point(float(pt["x"]), float(pt["y"]))
+                        except CDPError:
+                            pass
+                        time.sleep(2)
+                        continue
                 if passkey_skips < 3 and time.time() - last_passkey_skip > 5:
                     try:
                         if browser.evaluate(JS_SKIP_PASSKEY) == "skipped":
