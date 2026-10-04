@@ -23,7 +23,7 @@ import time
 import urllib.request
 
 APP_NAME = "Google 登录助手 Win"
-VERSION = "1.2"
+VERSION = "1.4"
 
 # ---------------------------------------------------------------- 登录目标
 TARGETS = {
@@ -125,6 +125,19 @@ const r=e.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};"""
 JS_VERIFY_FILL = """if(location.protocol!=='https:' || location.hostname!=='accounts.google.com') return false;
 const e=Array.from(document.querySelectorAll(arguments[0])).find(e=>e.getClientRects().length&&!e.disabled);
 return !!e&&document.activeElement===e&&e.value===arguments[1];"""
+
+# Google OAuth 授权页：自动点"继续"；非授权页返回 null
+JS_GOOGLE_CONSENT = """if(location.protocol!=='https:'||location.hostname!=='accounts.google.com') return null;
+const bodyText=(document.body&&(document.body.innerText||''))||'';
+if(!/(将允许|將允許|will share|to continue to)/i.test(bodyText)) return null;
+const btn=Array.from(document.querySelectorAll('button,[role="button"],a')).find(e=>{
+  const t=(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+  return /^(继续|繼續|Continue)/i.test(t)&&e.getClientRects().length&&!e.disabled;
+});
+if(!btn) return null;
+try{btn.scrollIntoView({block:'center'})}catch(_){}
+const r=btn.getBoundingClientRect();
+return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};"""
 
 # Google 选账号页：找与本账号邮箱一致的账号行，返回点击坐标；无匹配返回 null
 #（只在无输入框时调用，密码页顶部显示的邮箱不会误触）
@@ -557,6 +570,8 @@ def login_account(browser, account, target_key, stop, update):
     last_passkey_skip = 0.0
     chooser_attempts = 0
     last_chooser = 0.0
+    consent_attempts = 0
+    last_consent = 0.0
     last_action = 0.0
     try:
         handles = set(browser.page_ids())
@@ -593,6 +608,22 @@ def login_account(browser, account, target_key, stop, update):
                 update("Google 拒绝自动化登录 · 请用“普通打开”手动完成登录")
                 return
             if not state.get("email") and not state.get("password") and not state.get("otp"):
+                # Google OAuth 授权页：自动点"继续"（先于选账号，避免误点账号胶囊）
+                if consent_attempts < 3 and time.time() - last_consent > 6:
+                    try:
+                        pt = browser.evaluate(JS_GOOGLE_CONSENT)
+                    except CDPError:
+                        pt = None
+                    if isinstance(pt, dict) and isinstance(pt.get("x"), (int, float)) and isinstance(pt.get("y"), (int, float)):
+                        consent_attempts += 1
+                        last_consent = time.time()
+                        update("确认 Google 授权")
+                        try:
+                            browser.click_point(float(pt["x"]), float(pt["y"]))
+                        except CDPError:
+                            pass
+                        time.sleep(2)
+                        continue
                 # Google 选账号页：自动点选与本账号邮箱一致的账号
                 if chooser_attempts < 3 and time.time() - last_chooser > 6:
                     try:
@@ -938,6 +969,7 @@ class App:
 
     def start_login(self, target_key):
         if self.worker and self.worker.is_alive():
+            self.messagebox.showinfo("提示", "已有登录任务在运行，请等待完成后再试")
             return
         ids = self._selected_ids()
         if not ids:
