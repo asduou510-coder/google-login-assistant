@@ -119,6 +119,35 @@ enum GooglePrompts {
     if(!skip)return 'none';
     skip.click();return 'skipped';
     """
+    // Google 选账号页：找与本账号邮箱一致的账号行，返回点击坐标；无匹配返回 null
+    //（只在无输入框时调用，密码页顶部显示的邮箱不会误触）
+    static let chooserScript = """
+const want=(arguments[0]||'').toLowerCase();
+    if(location.protocol!=='https:'||location.hostname!=='accounts.google.com'||!want) return null;
+    const center=e=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
+    const vis=e=>e.getClientRects().length>0;
+    const row=Array.from(document.querySelectorAll('[data-identifier]')).find(e=>(e.getAttribute('data-identifier')||'').toLowerCase()===want&&vis(e));
+    if(row) return center(row);
+    const bodyText=(document.body&&(document.body.innerText||''))||'';
+    if(/选择账号|選擇帳號|Choose an account/i.test(bodyText)){
+      const leaf=Array.from(document.querySelectorAll('div,a,button,li')).find(e=>{
+        const t=(e.innerText||'').toLowerCase();
+        if(!t.includes(want)) return false;
+        if(Array.from(e.children).some(c=>((c.innerText||'').toLowerCase().includes(want)))) return false;
+        return vis(e);
+      });
+      if(leaf){
+        let el=leaf;
+        while(el&&el!==document.body){
+          const tg=el.tagName, rl=el.getAttribute?el.getAttribute('role'):null;
+          if(tg==='A'||tg==='BUTTON'||rl==='link'||rl==='button'||(el.hasAttribute&&el.hasAttribute('data-identifier'))) break;
+          el=el.parentElement;
+        }
+        return center(el&&el!==document.body?el:leaf);
+      }
+    }
+    return null;
+    """
 }
 enum FlowPage {
     // Detect actual workspace controls, not landing-page marketing text or cookies.
@@ -482,6 +511,8 @@ final class Browser: @unchecked Sendable {
             var workspaceMatches = 0
             var passkeySkips = 0
             var lastPasskeySkip = Date.distantPast
+            var chooserAttempts = 0
+            var lastChooser = Date.distantPast
             var lastAction = Date.distantPast
             var handles = Set(try pageIDs())
             let deadline = Date().addingTimeInterval(120)
@@ -505,17 +536,34 @@ final class Browser: @unchecked Sendable {
                 if !target.hosts.contains(host) { workspaceMatches = 0 }
                 if host == "accounts.google.com", state["https"] as? Bool == true {
                     if state["blocked"] as? Bool == true { update("Google 拒绝自动化登录 · 请点击普通打开，手动完成登录"); return }
-                    if state["email"] as? Bool != true, state["password"] as? Bool != true, state["otp"] as? Bool != true,
-                       passkeySkips < 3, Date().timeIntervalSince(lastPasskeySkip) > 5 {
-                        stage = "处理通行密钥提示"
-                        do {
-                            if try script(GooglePrompts.skipPasskeyScript) as? String == "skipped" {
-                                passkeySkips += 1; lastPasskeySkip = Date()
-                                update("已点击“以后再说”，继续登录")
+                    if state["email"] as? Bool != true, state["password"] as? Bool != true, state["otp"] as? Bool != true {
+                        // Google 选账号页：自动点选与本账号邮箱一致的账号
+                        if chooserAttempts < 3, Date().timeIntervalSince(lastChooser) > 6 {
+                            stage = "选择 Google 账号"
+                            do {
+                                if let pt = try script(GooglePrompts.chooserScript, args: [account.email]) as? [String: Any],
+                                   let x = pt["x"] as? Double, let y = pt["y"] as? Double {
+                                    chooserAttempts += 1; lastChooser = Date()
+                                    update("选择 Google 账号")
+                                    _ = try command("Input.dispatchMouseEvent", ["type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                    _ = try command("Input.dispatchMouseEvent", ["type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                    Thread.sleep(forTimeInterval: 2); continue
+                                }
+                            } catch let error as DriverFailure where error.transient {
                                 Thread.sleep(forTimeInterval: 1); continue
                             }
-                        } catch let error as DriverFailure where error.transient {
-                            Thread.sleep(forTimeInterval: 1); continue
+                        }
+                        if passkeySkips < 3, Date().timeIntervalSince(lastPasskeySkip) > 5 {
+                            stage = "处理通行密钥提示"
+                            do {
+                                if try script(GooglePrompts.skipPasskeyScript) as? String == "skipped" {
+                                    passkeySkips += 1; lastPasskeySkip = Date()
+                                    update("已点击“以后再说”，继续登录")
+                                    Thread.sleep(forTimeInterval: 1); continue
+                                }
+                            } catch let error as DriverFailure where error.transient {
+                                Thread.sleep(forTimeInterval: 1); continue
+                            }
                         }
                     }
                     if state["error"] as? Bool == true { update("需要人工操作：请检查登录信息或验证结果"); return }
