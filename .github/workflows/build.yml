@@ -17,7 +17,7 @@ jobs:
       - name: 安装打包依赖
         run: pip install pyinstaller
       - name: 打包 EXE
-        run: pyinstaller --onefile --windowed --name GoogleLoginWin win/google_login_win.py
+        run: pyinstaller --onefile --windowed --icon win/icon.ico --name GoogleLoginWin win/google_login_win.py
       - name: 上传 EXE
         uses: actions/upload-artifact@v4
         with:
