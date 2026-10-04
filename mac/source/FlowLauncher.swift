@@ -139,11 +139,12 @@ enum FlowPage {
     const visible=e=>!!e.getClientRects().length && !e.disabled;
     const label=e=>(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
     const safe=e=>{const h=e.getAttribute('href');if(!h)return true;try{const u=new URL(h,location.href);return u.protocol==='https:'&&['flow.google.com','labs.google','accounts.google.com'].includes(u.hostname)}catch{return false}};
+    const tclick=(e,a)=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {action:a,x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
     const nodes=Array.from(document.querySelectorAll('a,button,[role="button"]')).filter(e=>visible(e)&&safe(e));
     const entry=nodes.find(e=>/^(使用\\s*(Google\\s*)?Flow\\s*创建|Create with (Google )?Flow|Try (Google )?Flow|开始使用\\s*Flow)$/i.test(label(e)));
-    if(entry){entry.click();return 'entry'}
+    if(entry){return tclick(entry,'entry')}
     const signin=nodes.find(e=>/^(Sign in( with Google)?|Log in|登录|登入|使用 Google (账号|帐号)登录)$/i.test(label(e)) || (()=>{try{return new URL(e.getAttribute('href'),location.href).hostname==='accounts.google.com'}catch{return false}})());
-    if(signin){signin.click();return 'signin'}
+    if(signin){return tclick(signin,'signin')}
     return 'none';
     """
 }
@@ -187,12 +188,15 @@ enum RunningHubPage {
     """
 
     // Clicks the login entry, then the Google button inside the login modal.
-    // Returns 'entry', 'google', 'modal' or 'none'. Never follows off-site links.
+    // Returns click point {action,x,y} for entry/google (native code performs a trusted
+    // CDP mouse click; synthetic click() is not trusted and gets OAuth popups blocked),
+    // or 'modal'/'none'. Never follows off-site links.
     static let actionScript = """
     if(location.protocol!=='https:' || !['runninghub.ai','www.runninghub.ai'].includes(location.hostname)) return 'none';
     const visible=e=>!!e.getClientRects().length && !e.disabled;
     const label=e=>(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
     const safe=e=>{const h=e.getAttribute('href');if(!h)return true;try{const u=new URL(h,location.href);return u.protocol==='https:'&&['runninghub.ai','www.runninghub.ai','accounts.google.com'].includes(u.hostname)}catch{return false}};
+    const tclick=(e,a)=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {action:a,x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
     const modalRoot=document.querySelector('.ant-modal-root');
     const modal=(modalRoot&&visible(modalRoot))?modalRoot:null;
     if(modal){
@@ -201,11 +205,11 @@ enum RunningHubPage {
         while(gbtn&&gbtn!==modal){const t=gbtn.tagName;if(t==='BUTTON'||t==='A'||gbtn.getAttribute('role')==='button')break;gbtn=gbtn.parentElement;}
         const byText=Array.from(modal.querySelectorAll('button,a,[role="button"]')).find(e=>visible(e)&&safe(e)&&/使用\\s*Google.*(登入|登录)|Sign in with Google/i.test(label(e)));
         const target=(gbtn&&gbtn!==modal&&visible(gbtn)&&safe(gbtn))?gbtn:byText;
-        if(target){target.click();return 'google'}
+        if(target){return tclick(target,'google')}
         return 'modal';
     }
     const entry=Array.from(document.querySelectorAll('button.login-btn,button,a,[role="button"]')).find(e=>visible(e)&&safe(e)&&/^(登入\\s*\\/\\s*註冊|登\\s*入|登\\s*录|log\\s*in|sign\\s*in)$/i.test(label(e)));
-    if(entry){entry.click();return 'entry'}
+    if(entry){return tclick(entry,'entry')}
     return 'none';
     """
 }
@@ -548,7 +552,20 @@ final class Browser: @unchecked Sendable {
                     if Date().timeIntervalSince(lastAction) > 8, entryAttempts < 4 {
                         stage = "进入\(target.title)登录入口"
                         let action: String
-                        do { action = try script(target == .flow ? FlowPage.actionScript : RunningHubPage.actionScript) as? String ?? "none" }
+                        do {
+                            let raw = try script(target == .flow ? FlowPage.actionScript : RunningHubPage.actionScript)
+                            // 动作脚本返回点击坐标时，用 CDP 可信鼠标事件点击
+                            //（JS 合成的 click() 不是真人操作，会被浏览器拦截 OAuth 弹窗）
+                            if let dict = raw as? [String: Any],
+                               let a = dict["action"] as? String, ["entry", "google", "signin"].contains(a),
+                               let x = dict["x"] as? Double, let y = dict["y"] as? Double {
+                                _ = try command("Input.dispatchMouseEvent", ["type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                _ = try command("Input.dispatchMouseEvent", ["type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                action = a
+                            } else {
+                                action = raw as? String ?? "none"
+                            }
+                        }
                         catch let error as DriverFailure where error.transient {
                             Thread.sleep(forTimeInterval: 1); continue
                         }
@@ -1605,16 +1622,23 @@ func entryTests() throws {
         let data = try JSONSerialization.data(withJSONObject: ["host": host, "label": label, "href": href as Any? ?? NSNull(), "visible": visible])
         let fixture = String(data: data, encoding: .utf8)!
         ctx.evaluateScript("""
-        const fixture=\(fixture); let clicked=false;
+        const fixture=\(fixture);
         const location={protocol:'https:',hostname:fixture.host,href:'https://'+fixture.host+'/about'};
         class URL{constructor(value,base){const r=resolveURL(String(value),base||location.href);if(!r.hostname)throw Error('bad URL');this.hostname=r.hostname;this.protocol=r.protocol}}
-        const node={innerText:fixture.label,disabled:false,getClientRects:()=>fixture.visible?[{}]:[],getAttribute:n=>n==='href'?fixture.href:null,click:()=>{clicked=true}};
+        const node={innerText:fixture.label,disabled:false,getClientRects:()=>fixture.visible?[{}]:[],getAttribute:n=>n==='href'?fixture.href:null,scrollIntoView:()=>{},getBoundingClientRect:()=>({x:10,y:20,width:100,height:40})};
         const document={querySelectorAll:()=>[node]};
         """)
         guard ctx.exception == nil else { throw Failure.message("入口测试准备失败") }
-        let actual = ctx.evaluateScript("(function(){" + FlowPage.actionScript + "})()")?.toString()
-        guard ctx.exception == nil, actual == expected, ctx.evaluateScript("clicked")?.toBool() == (expected != "none") else {
-            throw Failure.message("入口回归测试失败：" + label)
+        let raw = ctx.evaluateScript("(function(){" + FlowPage.actionScript + "})()")
+        if expected == "none" {
+            guard ctx.exception == nil, raw?.toString() == "none" else {
+                throw Failure.message("入口回归测试失败：" + label)
+            }
+        } else {
+            let d = raw?.toDictionary()
+            guard ctx.exception == nil, d?["action"] as? String == expected, d?["x"] is NSNumber, d?["y"] is NSNumber else {
+                throw Failure.message("入口回归测试失败：" + label)
+            }
         }
     }
     guard DriverFailure(code: "timeout").transient, !DriverFailure(code: "invalid session id").transient else { throw Failure.message("错误分类测试失败") }
@@ -1654,9 +1678,9 @@ func runningHubTests() throws {
         let ctx = JSContext()!
         let loc = try JSONSerialization.data(withJSONObject: ["hostname": host, "protocol": "https:"])
         let flags = try JSONSerialization.data(withJSONObject: ["modal": modalOpen, "google": hasGoogle, "entry": hasEntry])
-        ctx.evaluateScript("var location=" + String(decoding: loc, as: UTF8.self) + ";var flags=" + String(decoding: flags, as: UTF8.self) + ";var clicked='';")
+        ctx.evaluateScript("var location=" + String(decoding: loc, as: UTF8.self) + ";var flags=" + String(decoding: flags, as: UTF8.self) + "")
         ctx.evaluateScript("""
-        const btn=(text,tag)=>({tagName:tag,innerText:text,disabled:false,getClientRects:()=>[{}],getAttribute:()=>null,click:()=>{clicked=text},parentElement:null});
+        const btn=(text,tag)=>({tagName:tag,innerText:text,disabled:false,getClientRects:()=>[{}],getAttribute:()=>null,scrollIntoView:()=>{},getBoundingClientRect:()=>({x:10,y:20,width:100,height:40}),parentElement:null});
         const entryBtn=btn('登入 / 註冊','BUTTON');
         const gBtn=btn('使用 Google 帳號登入','BUTTON');
         const gImg={tagName:'IMG',disabled:false,getClientRects:()=>[{}],getAttribute:n=>n==='alt'?'Google 標誌':null,parentElement:gBtn};
@@ -1666,11 +1690,17 @@ func runningHubTests() throws {
         var document={querySelector:s=>flags.modal&&/ant-modal-root/.test(s)?modal:null,
           querySelectorAll:()=>flags.entry?[entryBtn]:[]};
         """)
-        let actual = ctx.evaluateScript("(function(){" + RunningHubPage.actionScript + "})()")?.toString()
-        let clicked = ctx.evaluateScript("clicked")?.toString() ?? ""
+        let raw = ctx.evaluateScript("(function(){" + RunningHubPage.actionScript + "})()")
         let expectClick = expected == "entry" || expected == "google"
-        guard ctx.exception == nil, actual == expected, clicked.isEmpty == !expectClick else {
-            throw Failure.message("RunningHub 入口动作失败：" + host + "/" + expected)
+        if expectClick {
+            let d = raw?.toDictionary()
+            guard ctx.exception == nil, d?["action"] as? String == expected, d?["x"] is NSNumber, d?["y"] is NSNumber else {
+                throw Failure.message("RunningHub 入口动作失败：" + host + "/" + expected)
+            }
+        } else {
+            guard ctx.exception == nil, raw?.toString() == expected else {
+                throw Failure.message("RunningHub 入口动作失败：" + host + "/" + expected)
+            }
         }
     }
     guard loginEntryMessage(target: .runninghub, action: "google") == "已点击 Google 登录，等待账号页面" else {
