@@ -148,6 +148,20 @@ enum GooglePrompts {
     }
     return null;
     """
+    // Google OAuth 授权页：自动点"继续"；非授权页返回 null
+    static let consentScript = """
+    if(location.protocol!=='https:'||location.hostname!=='accounts.google.com') return null;
+    const bodyText=(document.body&&(document.body.innerText||''))||'';
+    if(!/(将允许|將允許|will share|to continue to)/i.test(bodyText)) return null;
+    const btn=Array.from(document.querySelectorAll('button,[role="button"],a')).find(e=>{
+      const t=(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
+      return /^(继续|繼續|Continue)/i.test(t)&&e.getClientRects().length&&!e.disabled;
+    });
+    if(!btn) return null;
+    try{btn.scrollIntoView({block:'center'})}catch(_){}
+    const r=btn.getBoundingClientRect();
+    return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)};
+    """
 }
 enum FlowPage {
     // Detect actual workspace controls, not landing-page marketing text or cookies.
@@ -513,6 +527,8 @@ final class Browser: @unchecked Sendable {
             var lastPasskeySkip = Date.distantPast
             var chooserAttempts = 0
             var lastChooser = Date.distantPast
+            var consentAttempts = 0
+            var lastConsent = Date.distantPast
             var lastAction = Date.distantPast
             var handles = Set(try pageIDs())
             let deadline = Date().addingTimeInterval(120)
@@ -537,6 +553,22 @@ final class Browser: @unchecked Sendable {
                 if host == "accounts.google.com", state["https"] as? Bool == true {
                     if state["blocked"] as? Bool == true { update("Google 拒绝自动化登录 · 请点击普通打开，手动完成登录"); return }
                     if state["email"] as? Bool != true, state["password"] as? Bool != true, state["otp"] as? Bool != true {
+                        // Google OAuth 授权页：自动点"继续"（先于选账号，避免误点账号胶囊）
+                        if consentAttempts < 3, Date().timeIntervalSince(lastConsent) > 6 {
+                            stage = "确认 Google 授权"
+                            do {
+                                if let pt = try script(GooglePrompts.consentScript) as? [String: Any],
+                                   let x = pt["x"] as? Double, let y = pt["y"] as? Double {
+                                    consentAttempts += 1; lastConsent = Date()
+                                    update("确认 Google 授权")
+                                    _ = try command("Input.dispatchMouseEvent", ["type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                    _ = try command("Input.dispatchMouseEvent", ["type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1])
+                                    Thread.sleep(forTimeInterval: 2); continue
+                                }
+                            } catch let error as DriverFailure where error.transient {
+                                Thread.sleep(forTimeInterval: 1); continue
+                            }
+                        }
                         // Google 选账号页：自动点选与本账号邮箱一致的账号
                         if chooserAttempts < 3, Date().timeIntervalSince(lastChooser) > 6 {
                             stage = "选择 Google 账号"
@@ -1001,7 +1033,8 @@ enum ProfileFiles {
     }
     func openingURL()->String {workspace.groups.first{$0.id==filter}?.url ?? "https://flow.google.com/"}
     func run(_ items:[Account],automatic:Bool=true,target:LoginTarget = .flow) {
-        guard !busy,!items.isEmpty else{return}
+        guard !items.isEmpty else{return}
+        guard !busy else{error="已有任务在运行，请等待当前任务完成后再试";return}
         guard workspace.runEnabled else{error="请先打开运行开关";return}
         if scope=="system" {
             let binary=workspace.chromePath
