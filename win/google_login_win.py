@@ -23,7 +23,7 @@ import time
 import urllib.request
 
 APP_NAME = "Google 登录助手 Win"
-VERSION = "1.0"
+VERSION = "1.1"
 
 # ---------------------------------------------------------------- 登录目标
 TARGETS = {
@@ -77,11 +77,12 @@ JS_FLOW_ACTION = """if(location.protocol !== 'https:' || !['flow.google.com','la
 const visible=e=>!!e.getClientRects().length && !e.disabled;
 const label=e=>(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
 const safe=e=>{const h=e.getAttribute('href');if(!h)return true;try{const u=new URL(h,location.href);return u.protocol==='https:'&&['flow.google.com','labs.google','accounts.google.com'].includes(u.hostname)}catch{return false}};
+const tclick=(e,a)=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {action:a,x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
 const nodes=Array.from(document.querySelectorAll('a,button,[role="button"]')).filter(e=>visible(e)&&safe(e));
 const entry=nodes.find(e=>/^(使用\\s*(Google\\s*)?Flow\\s*创建|Create with (Google )?Flow|Try (Google )?Flow|开始使用\\s*Flow)$/i.test(label(e)));
-if(entry){entry.click();return 'entry'}
+if(entry){return tclick(entry,'entry')}
 const signin=nodes.find(e=>/^(Sign in( with Google)?|Log in|登录|登入|使用 Google (账号|帐号)登录)$/i.test(label(e)) || (()=>{try{return new URL(e.getAttribute('href'),location.href).hostname==='accounts.google.com'}catch{return false}})());
-if(signin){signin.click();return 'signin'}
+if(signin){return tclick(signin,'signin')}
 return 'none';"""
 
 # RunningHub：登录态识别 / 入口点击（选择器经 2026-10-04 实测 DOM）
@@ -97,6 +98,7 @@ JS_RH_ACTION = """if(location.protocol!=='https:' || !['runninghub.ai','www.runn
 const visible=e=>!!e.getClientRects().length && !e.disabled;
 const label=e=>(e.innerText||e.textContent||e.getAttribute('aria-label')||'').replace(/\\s+/g,' ').trim();
 const safe=e=>{const h=e.getAttribute('href');if(!h)return true;try{const u=new URL(h,location.href);return u.protocol==='https:'&&['runninghub.ai','www.runninghub.ai','accounts.google.com'].includes(u.hostname)}catch{return false}};
+const tclick=(e,a)=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {action:a,x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
 const modalRoot=document.querySelector('.ant-modal-root');
 const modal=(modalRoot&&visible(modalRoot))?modalRoot:null;
 if(modal){
@@ -105,11 +107,11 @@ if(modal){
     while(gbtn&&gbtn!==modal){const t=gbtn.tagName;if(t==='BUTTON'||t==='A'||gbtn.getAttribute('role')==='button')break;gbtn=gbtn.parentElement;}
     const byText=Array.from(modal.querySelectorAll('button,a,[role="button"]')).find(e=>visible(e)&&safe(e)&&/使用\\s*Google.*(登入|登录)|Sign in with Google/i.test(label(e)));
     const target=(gbtn&&gbtn!==modal&&visible(gbtn)&&safe(gbtn))?gbtn:byText;
-    if(target){target.click();return 'google'}
+    if(target){return tclick(target,'google')}
     return 'modal';
 }
 const entry=Array.from(document.querySelectorAll('button.login-btn,button,a,[role="button"]')).find(e=>visible(e)&&safe(e)&&/^(登入\\s*\\/\\s*註冊|登\\s*入|登\\s*录|log\\s*in|sign\\s*in)$/i.test(label(e)));
-if(entry){entry.click();return 'entry'}
+if(entry){return tclick(entry,'entry')}
 return 'none';"""
 
 # 可信填表：只允许 accounts.google.com
@@ -617,10 +619,24 @@ def login_account(browser, account, target_key, stop, update):
                 return
             if time.time() - last_action > 8 and entry_attempts < 4:
                 try:
-                    action = browser.evaluate(scripts["action"]) or "none"
+                    raw = browser.evaluate(scripts["action"]) or "none"
                 except CDPError:
                     time.sleep(1)
                     continue
+                # 动作脚本返回点击坐标时，用 CDP 可信鼠标事件点击
+                #（JS 合成的 click() 不是真人操作，会被浏览器拦截 OAuth 弹窗）
+                action = "none"
+                if isinstance(raw, dict):
+                    a = raw.get("action")
+                    if a in ("entry", "google", "signin") and isinstance(raw.get("x"), (int, float)) and isinstance(raw.get("y"), (int, float)):
+                        try:
+                            browser.click_point(float(raw["x"]), float(raw["y"]))
+                        except CDPError:
+                            time.sleep(1)
+                            continue
+                        action = a
+                elif isinstance(raw, str):
+                    action = raw
                 if action != "none":
                     last_action = time.time()
                     entry_attempts += 1
