@@ -122,7 +122,7 @@ enum GooglePrompts {
     // Google 选账号页：找与本账号邮箱一致的账号行，返回点击坐标；无匹配返回 null
     //（只在无输入框时调用，密码页顶部显示的邮箱不会误触）
     static let chooserScript = """
-const want=(arguments[0]||'').toLowerCase();
+    const want=(arguments[0]||'').toLowerCase();
     if(location.protocol!=='https:'||location.hostname!=='accounts.google.com'||!want) return null;
     const center=e=>{try{e.scrollIntoView({block:'center'})}catch(_){};const r=e.getBoundingClientRect();return {x:Math.round(r.x+r.width/2),y:Math.round(r.y+r.height/2)}};
     const vis=e=>e.getClientRects().length>0;
